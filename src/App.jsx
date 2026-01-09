@@ -5,9 +5,81 @@ import * as XLSX from 'xlsx';
 const SUPABASE_URL = 'https://wbbobsmddyonnycasecs.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiYm9ic21kZHlvbm55Y2FzZWNzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc4NTUxNTMsImV4cCI6MjA4MzQzMTE1M30.6u9iAh4fUiKvqt6JInyxnAdLoWTgs913q2TrkLPxsRE';
 
-// 기본 설정
-const DEFAULT_SETTINGS = {
-  questionCount: 10
+// 간단한 Supabase REST API 클라이언트
+const supabase = {
+  from: (table) => ({
+    select: async (columns = '*', options = {}) => {
+      const url = new URL(`${SUPABASE_URL}/rest/v1/${table}`);
+      url.searchParams.set('select', columns);
+      if (options.count === 'exact') {
+        url.searchParams.set('count', 'exact');
+      }
+      const res = await fetch(url, {
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+          'Prefer': options.count ? 'count=exact' : ''
+        }
+      });
+      const data = await res.json();
+      const count = res.headers.get('content-range')?.split('/')[1];
+      return { data, count: count ? parseInt(count) : null, error: res.ok ? null : data };
+    },
+    insert: async (rows) => {
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+        method: 'POST',
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+          'Content-Type': 'application/json',
+          'Prefer': 'return=representation'
+        },
+        body: JSON.stringify(rows)
+      });
+      const data = await res.json();
+      return { data, error: res.ok ? null : data };
+    },
+    update: async (updates) => ({
+      eq: async (column, value) => {
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${column}=eq.${value}`, {
+          method: 'PATCH',
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'Content-Type': 'application/json',
+            'Prefer': 'return=representation'
+          },
+          body: JSON.stringify(updates)
+        });
+        const data = await res.json();
+        return { data, error: res.ok ? null : data };
+      }
+    }),
+    delete: async () => ({
+      neq: async (column, value) => {
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${column}=neq.${value}`, {
+          method: 'DELETE',
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+          }
+        });
+        return { error: res.ok ? null : await res.json() };
+      }
+    }),
+    eq: (column, value) => ({
+      select: async (columns = '*') => {
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${column}=eq.${encodeURIComponent(value)}&select=${columns}`, {
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+          }
+        });
+        const data = await res.json();
+        return { data, error: res.ok ? null : data };
+      }
+    })
+  })
 };
 
 // ============ API 함수들 ============
@@ -26,6 +98,7 @@ async function login(phone, password) {
 }
 
 async function register(name, phone, password) {
+  // 중복 체크
   const checkRes = await fetch(`${SUPABASE_URL}/rest/v1/users?phone=eq.${encodeURIComponent(phone)}&select=id`, {
     headers: {
       'apikey': SUPABASE_ANON_KEY,
@@ -141,6 +214,7 @@ async function getUserStats(userId) {
   const totalQuestions = results.reduce((sum, r) => sum + r.total_questions, 0);
   const avgScore = totalQuestions > 0 ? Math.round((totalCorrect / totalQuestions) * 100) : 0;
   
+  // 연속 학습일 계산
   const dates = [...new Set(results.map(r => r.created_at.split('T')[0]))].sort().reverse();
   let streak = 0;
   const today = new Date().toISOString().split('T')[0];
@@ -178,15 +252,7 @@ async function getWeeklyReport(userId) {
     const dateKey = date.toISOString().split('T')[0];
     const month = date.getMonth() + 1;
     const day = date.getDate();
-    dailyData[dateKey] = { 
-      day: days[date.getDay()], 
-      date: `${month}/${day}`,
-      fullDate: dateKey,
-      score: 0, 
-      tests: 0, 
-      correct: 0, 
-      total: 0 
-    };
+    dailyData[dateKey] = { day: days[date.getDay()], date: `${month}/${day}`, score: 0, tests: 0, correct: 0, total: 0 };
   }
   
   (results || []).forEach(result => {
@@ -263,6 +329,35 @@ async function getUserWeeklyStats(userId) {
   return { totalTests, avgScore, totalCorrect, totalQuestions };
 }
 
+// 사용자 삭제 (관리자용)
+async function deleteUser(userId) {
+  // 먼저 해당 사용자의 테스트 결과 삭제
+  await fetch(`${SUPABASE_URL}/rest/v1/test_results?user_id=eq.${userId}`, {
+    method: 'DELETE',
+    headers: {
+      'apikey': SUPABASE_ANON_KEY,
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+    }
+  });
+  
+  // 사용자 삭제
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${userId}`, {
+    method: 'DELETE',
+    headers: {
+      'apikey': SUPABASE_ANON_KEY,
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+    }
+  });
+  
+  if (!res.ok) throw new Error('사용자 삭제에 실패했습니다.');
+  return true;
+}
+
+// 기본 설정
+const DEFAULT_SETTINGS = {
+  questionCount: 10
+};
+
 // ============ 메인 앱 컴포넌트 ============
 export default function VocabQuizApp() {
   const [currentPage, setCurrentPage] = useState('login');
@@ -272,6 +367,7 @@ export default function VocabQuizApp() {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [selectedUserId, setSelectedUserId] = useState(null);
 
+  // 로컬 스토리지에서 사용자 정보 복원
   useEffect(() => {
     const savedUser = localStorage.getItem('vocab_user');
     const savedSettings = localStorage.getItem('vocab_settings');
@@ -398,13 +494,14 @@ export default function VocabQuizApp() {
         .spin { animation: spin 1s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
         
-        input:focus, select:focus {
+        input:focus {
           outline: none;
           border-color: #667eea;
           box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
         }
       `}</style>
       
+      {/* 배경 장식 */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-20 left-10 w-72 h-72 bg-purple-500/10 rounded-full blur-3xl floating" />
         <div className="absolute bottom-20 right-10 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl floating" style={{ animationDelay: '1s' }} />
@@ -456,9 +553,9 @@ function LoginPage({ onLogin, setCurrentPage }) {
     <div className="min-h-screen flex flex-col justify-center px-6 py-12">
       <div className="text-center mb-10">
         <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 mb-6 pulse-glow">
-          <span className="text-4xl">📚</span>
+          <span className="text-4xl">🔤</span>
         </div>
-        <h1 className="text-3xl font-bold gradient-text mb-2">Vocab Master</h1>
+        <h1 className="text-4xl font-bold gradient-text mb-2">Daily Voca</h1>
         <p className="text-slate-400">유의어 · 반의어 학습</p>
       </div>
 
@@ -649,6 +746,7 @@ function HomePage({ user, onLogout, startQuiz, setCurrentPage, settings }) {
 
   return (
     <div className="min-h-screen px-6 py-8 pb-24">
+      {/* 헤더 */}
       <div className="flex items-center justify-between mb-8">
         <div>
           <p className="text-slate-400 text-sm">안녕하세요 👋</p>
@@ -663,6 +761,7 @@ function HomePage({ user, onLogout, startQuiz, setCurrentPage, settings }) {
         </button>
       </div>
 
+      {/* 통계 카드 */}
       <div className="glass rounded-2xl p-5 mb-6">
         {loading ? (
           <div className="flex justify-center py-8">
@@ -696,6 +795,7 @@ function HomePage({ user, onLogout, startQuiz, setCurrentPage, settings }) {
         <span className="text-white font-medium">{settings.questionCount}문제</span>
       </div>
 
+      {/* 퀴즈 모드 선택 */}
       <h2 className="text-lg font-semibold text-white mb-4">학습 모드 선택</h2>
       
       <div className="space-y-4">
@@ -733,6 +833,7 @@ function HomePage({ user, onLogout, startQuiz, setCurrentPage, settings }) {
         </button>
       </div>
 
+      {/* 하단 네비게이션 */}
       <BottomNav currentPage="home" setCurrentPage={setCurrentPage} isAdmin={user?.is_admin} />
     </div>
   );
@@ -761,7 +862,6 @@ function QuizPage({ user, quizType, onFinish, setCurrentPage, settings }) {
           } else if (quizType === 'antonym') {
             return word.antonyms && word.antonyms.length > 0;
           } else {
-            // mixed: 유의어 또는 반의어 중 하나라도 있으면 됨
             return (word.synonyms && word.synonyms.length > 0) || (word.antonyms && word.antonyms.length > 0);
           }
         });
@@ -777,21 +877,14 @@ function QuizPage({ user, quizType, onFinish, setCurrentPage, settings }) {
         
         const generated = shuffled.map((word, idx) => {
           let isAntonym;
-          if (quizType === 'synonym') {
-            isAntonym = false;
-          } else if (quizType === 'antonym') {
-            isAntonym = true;
-          } else {
-            // mixed: 해당 단어에 있는 것 중에서 선택
+          if (quizType === 'synonym') isAntonym = false;
+          else if (quizType === 'antonym') isAntonym = true;
+          else {
             const hasSynonyms = word.synonyms && word.synonyms.length > 0;
             const hasAntonyms = word.antonyms && word.antonyms.length > 0;
-            if (hasSynonyms && hasAntonyms) {
-              isAntonym = Math.random() > 0.5;
-            } else {
-              isAntonym = hasAntonyms;
-            }
+            if (hasSynonyms && hasAntonyms) isAntonym = Math.random() > 0.5;
+            else isAntonym = hasAntonyms;
           }
-
           const correctAnswers = isAntonym ? (word.antonyms || []) : (word.synonyms || []);
           
           if (correctAnswers.length === 0) {
@@ -800,7 +893,7 @@ function QuizPage({ user, quizType, onFinish, setCurrentPage, settings }) {
           
           const correctAnswer = correctAnswers[Math.floor(Math.random() * correctAnswers.length)];
           
-          // 오답 생성 - 같은 타입(유의어/반의어)에서 가져옴
+          // 오답 생성
           const otherWords = validWords.filter(w => w.id !== word.id);
           const wrongOptions = [];
           let attempts = 0;
@@ -872,12 +965,12 @@ function QuizPage({ user, quizType, onFinish, setCurrentPage, settings }) {
       setSelectedAnswer(null);
       setShowResult(false);
     } else {
+      // 결과 저장
       const timeSpent = Math.round((Date.now() - startTime) / 1000);
-      const finalScore = score + (selectedAnswer === questions[currentQuestion].correctAnswer ? 1 : 0);
       const result = {
         testType: quizType,
         totalQuestions: questions.length,
-        correctAnswers: finalScore,
+        correctAnswers: score + (selectedAnswer === questions[currentQuestion].correctAnswer ? 1 : 0),
         wrongWords: wrongAnswers,
         timeSpentSeconds: timeSpent
       };
@@ -912,16 +1005,19 @@ function QuizPage({ user, quizType, onFinish, setCurrentPage, settings }) {
 
   return (
     <div className="min-h-screen px-6 py-8">
+      {/* 헤더 */}
       <div className="flex items-center justify-between mb-6">
         <button onClick={() => setCurrentPage('home')} className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center">←</button>
         <span className="text-slate-400 text-sm">{current.questionType === 'synonym' ? '유의어' : '반의어'} 퀴즈</span>
         <div className="text-white font-medium">{currentQuestion + 1}/{questions.length}</div>
       </div>
 
+      {/* 진행 바 */}
       <div className="h-2 bg-white/10 rounded-full mb-8 overflow-hidden">
         <div className="h-full progress-bar rounded-full transition-all duration-500" style={{ width: `${progress}%` }} />
       </div>
 
+      {/* 문제 카드 */}
       <div className="glass rounded-3xl p-8 mb-8 text-center">
         <div className="mb-2">
           <span className={`inline-block px-3 py-1 rounded-full text-xs font-medium ${
@@ -934,6 +1030,7 @@ function QuizPage({ user, quizType, onFinish, setCurrentPage, settings }) {
         <p className="text-slate-400">{current.meaning_ko}</p>
       </div>
 
+      {/* 선택지 */}
       <div className="space-y-3 mb-8">
         {current.options.map((option, idx) => {
           let className = "option-btn w-full py-4 px-6 rounded-2xl text-left font-medium border border-white/10 bg-white/5";
@@ -949,6 +1046,7 @@ function QuizPage({ user, quizType, onFinish, setCurrentPage, settings }) {
         })}
       </div>
 
+      {/* 결과 및 다음 버튼 */}
       {showResult && (
         <div className="space-y-4">
           <div className={`p-4 rounded-2xl text-center ${
@@ -962,6 +1060,7 @@ function QuizPage({ user, quizType, onFinish, setCurrentPage, settings }) {
         </div>
       )}
 
+      {/* 현재 점수 */}
       <div className="fixed bottom-8 left-1/2 -translate-x-1/2">
         <div className="glass rounded-full px-6 py-2">
           <span className="text-slate-400">현재 점수: </span>
@@ -1168,11 +1267,7 @@ function UploadPage({ user, setCurrentPage }) {
         antonyms: (row.antonyms || row.Antonyms || row['반의어'] || '').split(',').map(s => s.trim()).filter(s => s),
         category: row.category || row['분류'] || null,
         difficulty: parseInt(row.difficulty || row['난이도']) || 1
-      })).filter(w => w.word);
-
-      // 유의어/반의어 없는 단어 카운트
-      const validWords = words.filter(w => w.synonyms.length > 0 || w.antonyms.length > 0);
-      const skippedWords = words.length - validWords.length;
+      })).filter(w => w.word && (w.synonyms.length > 0 || w.antonyms.length > 0));
       
       if (words.length === 0) {
         setResult({ success: false, message: '유효한 단어가 없습니다. 엑셀 형식을 확인하세요.' });
@@ -1180,13 +1275,7 @@ function UploadPage({ user, setCurrentPage }) {
       }
       
       await addWords(words);
-      
-      let message = `${words.length}개의 단어가 추가되었습니다.`;
-      if (skippedWords > 0) {
-        message += ` (${skippedWords}개는 유의어/반의어가 없어 퀴즈에서 제외됩니다)`;
-      }
-      
-      setResult({ success: true, message });
+      setResult({ success: true, message: `${words.length}개의 단어가 추가되었습니다.` });
       setFile(null);
     } catch (err) {
       console.error('업로드 실패:', err);
@@ -1241,7 +1330,6 @@ function UploadPage({ user, setCurrentPage }) {
             </tbody>
           </table>
         </div>
-        <p className="text-slate-500 text-xs mt-3">* 유의어 또는 반의어가 없는 단어는 퀴즈에서 제외됩니다.</p>
       </div>
 
       <div className="glass rounded-2xl p-6 mb-6">
@@ -1331,6 +1419,7 @@ function SettingsPage({ user, setUser, onLogout, setCurrentPage }) {
     
     setLoading(true);
     try {
+      // 현재 비밀번호 확인
       const checkRes = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${user.id}&password=eq.${encodeURIComponent(currentPw)}&select=id`, {
         headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` }
       });
@@ -1341,6 +1430,7 @@ function SettingsPage({ user, setUser, onLogout, setCurrentPage }) {
         return;
       }
       
+      // 비밀번호 변경
       const updateRes = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${user.id}`, {
         method: 'PATCH',
         headers: {
@@ -1383,10 +1473,6 @@ function SettingsPage({ user, setUser, onLogout, setCurrentPage }) {
           <div className="flex justify-between">
             <span className="text-slate-400">전화번호</span>
             <span className="text-white">{user?.phone}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-slate-400">계정 유형</span>
-            <span className="text-white">{user?.is_admin ? '관리자' : '일반 사용자'}</span>
           </div>
         </div>
       </div>
@@ -1444,43 +1530,76 @@ function SettingsPage({ user, setUser, onLogout, setCurrentPage }) {
   );
 }
 
+// ============ 하단 네비게이션 ============
+function BottomNav({ currentPage, setCurrentPage, isAdmin }) {
+  const items = [
+    { id: 'home', icon: '🏠', label: '홈' },
+    { id: 'report', icon: '📊', label: '리포트' },
+    { id: 'upload', icon: '📁', label: '업로드' },
+    { id: 'settings', icon: '⚙️', label: '설정' },
+  ];
+
+  if (isAdmin) {
+    items.splice(3, 0, { id: 'admin', icon: '👑', label: '관리자' });
+  }
+  
+  return (
+    <div className="fixed bottom-0 left-0 right-0 glass border-t border-white/10">
+      <div className="max-w-md mx-auto flex justify-around py-4">
+        {items.map(item => (
+          <button
+            key={item.id}
+            onClick={() => setCurrentPage(item.id)}
+            className={`flex flex-col items-center gap-1 ${currentPage === item.id ? 'text-indigo-400' : 'text-slate-400 hover:text-white'}`}
+          >
+            <span className="text-xl">{item.icon}</span>
+            <span className="text-xs">{item.label}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ============ 관리자 페이지 ============
 function AdminPage({ user, setCurrentPage, settings, updateSettings, viewUserReport }) {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [questionCount, setQuestionCount] = useState(settings.questionCount);
   const [userStats, setUserStats] = useState({});
+  const [deleting, setDeleting] = useState(null);
 
-  useEffect(() => {
-    async function loadData() {
-      try {
-        const allUsers = await getAllUsers();
-        setUsers(allUsers);
-        
-        // 각 사용자의 주간 통계 로드
-        const stats = {};
-        for (const u of allUsers) {
-          stats[u.id] = await getUserWeeklyStats(u.id);
-        }
-        setUserStats(stats);
-      } catch (err) {
-        console.error('관리자 데이터 로딩 실패:', err);
-      } finally {
-        setLoading(false);
-      }
-    }
-    loadData();
-  }, []);
+  useEffect(() => { loadData(); }, []);
 
-  const handleSaveSettings = () => {
-    updateSettings({ ...settings, questionCount: parseInt(questionCount) });
-    alert('설정이 저장되었습니다.');
+  async function loadData() {
+    try {
+      const allUsers = await getAllUsers();
+      setUsers(allUsers);
+      const stats = {};
+      for (const u of allUsers) { stats[u.id] = await getUserWeeklyStats(u.id); }
+      setUserStats(stats);
+    } catch (err) { console.error('관리자 데이터 로딩 실패:', err); }
+    finally { setLoading(false); }
+  }
+
+  const handleSaveSettings = () => { 
+    updateSettings({ ...settings, questionCount: parseInt(questionCount) }); 
+    alert('설정이 저장되었습니다.'); 
   };
 
-  if (!user?.is_admin) {
-    setCurrentPage('home');
-    return null;
-  }
+  const handleDeleteUser = async (userId, userName) => {
+    if (!confirm(`정말 "${userName}" 사용자를 삭제하시겠습니까?\n해당 사용자의 모든 테스트 기록도 함께 삭제됩니다.`)) return;
+    setDeleting(userId);
+    try { 
+      await deleteUser(userId); 
+      setUsers(users.filter(u => u.id !== userId)); 
+      alert('사용자가 삭제되었습니다.'); 
+    }
+    catch (err) { alert('사용자 삭제에 실패했습니다.'); }
+    finally { setDeleting(null); }
+  };
+
+  if (!user?.is_admin) { setCurrentPage('home'); return null; }
 
   return (
     <div className="min-h-screen px-6 py-8 pb-24">
@@ -1489,38 +1608,24 @@ function AdminPage({ user, setCurrentPage, settings, updateSettings, viewUserRep
         <h1 className="text-xl font-bold text-white">관리자 페이지</h1>
       </div>
 
-      {/* 퀴즈 설정 */}
       <div className="glass rounded-2xl p-6 mb-6">
         <h2 className="text-lg font-semibold text-white mb-4">⚙️ 퀴즈 설정</h2>
         <div className="space-y-4">
           <div>
             <label className="block text-sm text-slate-400 mb-2">문제 수</label>
-            <select
-              value={questionCount}
-              onChange={(e) => setQuestionCount(e.target.value)}
-              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white"
-            >
+            <select value={questionCount} onChange={(e) => setQuestionCount(e.target.value)} className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white">
               <option value="10">10문제</option>
               <option value="20">20문제</option>
             </select>
           </div>
-          <button
-            onClick={handleSaveSettings}
-            className="w-full py-3 rounded-xl btn-primary text-white font-medium"
-          >
-            설정 저장
-          </button>
+          <button onClick={handleSaveSettings} className="w-full py-3 rounded-xl btn-primary text-white font-medium">설정 저장</button>
         </div>
       </div>
 
-      {/* 사용자 목록 */}
       <div className="glass rounded-2xl p-6">
-        <h2 className="text-lg font-semibold text-white mb-4">👥 사용자 관리</h2>
-        
+        <h2 className="text-lg font-semibold text-white mb-4">👥 사용자 관리 ({users.length}명)</h2>
         {loading ? (
-          <div className="flex justify-center py-8">
-            <span className="w-8 h-8 border-2 border-white/30 border-t-white rounded-full spin" />
-          </div>
+          <div className="flex justify-center py-8"><span className="w-8 h-8 border-2 border-white/30 border-t-white rounded-full spin" /></div>
         ) : (
           <div className="space-y-3">
             {users.map((u) => (
@@ -1530,12 +1635,14 @@ function AdminPage({ user, setCurrentPage, settings, updateSettings, viewUserRep
                     <span className="text-white font-medium">{u.name}</span>
                     {u.is_admin && <span className="ml-2 text-xs bg-indigo-500/30 text-indigo-300 px-2 py-0.5 rounded-full">관리자</span>}
                   </div>
-                  <button
-                    onClick={() => viewUserReport(u.id)}
-                    className="text-xs bg-white/10 text-slate-300 px-3 py-1.5 rounded-lg hover:bg-white/20"
-                  >
-                    리포트 보기
-                  </button>
+                  <div className="flex gap-2">
+                    <button onClick={() => viewUserReport(u.id)} className="text-xs bg-white/10 text-slate-300 px-3 py-1.5 rounded-lg hover:bg-white/20">리포트</button>
+                    {!u.is_admin && (
+                      <button onClick={() => handleDeleteUser(u.id, u.name)} disabled={deleting === u.id} className="text-xs bg-red-500/20 text-red-400 px-3 py-1.5 rounded-lg hover:bg-red-500/30 disabled:opacity-50">
+                        {deleting === u.id ? '삭제중...' : '삭제'}
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <div className="text-sm text-slate-400">{u.phone}</div>
                 <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
@@ -1570,28 +1677,21 @@ function UserReportPage({ userId, setCurrentPage }) {
   useEffect(() => {
     async function loadReport() {
       try {
-        // 사용자 정보 가져오기
-        const userRes = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${userId}&select=*`, {
-          headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` }
+        const userRes = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${userId}&select=*`, { 
+          headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` } 
         });
         const users = await userRes.json();
-        if (users && users.length > 0) {
-          setUserData(users[0]);
-        }
-
+        if (users && users.length > 0) setUserData(users[0]);
         const [weekly, wrong, stats] = await Promise.all([
-          getWeeklyReport(userId),
-          getFrequentlyWrongWords(userId),
+          getWeeklyReport(userId), 
+          getFrequentlyWrongWords(userId), 
           getUserStats(userId)
         ]);
-        setWeeklyData(weekly);
-        setWrongWords(wrong);
+        setWeeklyData(weekly); 
+        setWrongWords(wrong); 
         setSummary(stats);
-      } catch (err) {
-        console.error('리포트 로딩 실패:', err);
-      } finally {
-        setLoading(false);
-      }
+      } catch (err) { console.error('리포트 로딩 실패:', err); }
+      finally { setLoading(false); }
     }
     loadReport();
   }, [userId]);
@@ -1609,26 +1709,15 @@ function UserReportPage({ userId, setCurrentPage }) {
       </div>
 
       {loading ? (
-        <div className="flex justify-center py-20">
-          <span className="w-10 h-10 border-2 border-white/30 border-t-white rounded-full spin" />
-        </div>
+        <div className="flex justify-center py-20"><span className="w-10 h-10 border-2 border-white/30 border-t-white rounded-full spin" /></div>
       ) : (
         <>
           <div className="glass rounded-2xl p-6 mb-6">
             <h2 className="text-lg font-semibold text-white mb-4">이번 주 요약</h2>
             <div className="grid grid-cols-3 gap-4">
-              <div className="text-center">
-                <div className="text-2xl font-bold gradient-text">{weeklyData.reduce((s, d) => s + d.tests, 0)}</div>
-                <div className="text-slate-400 text-xs mt-1">총 테스트</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-bold gradient-text">{summary.avgScore}%</div>
-                <div className="text-slate-400 text-xs mt-1">평균 점수</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-bold gradient-text">{summary.streak}일</div>
-                <div className="text-slate-400 text-xs mt-1">연속 학습</div>
-              </div>
+              <div className="text-center"><div className="text-2xl font-bold gradient-text">{weeklyData.reduce((s, d) => s + d.tests, 0)}</div><div className="text-slate-400 text-xs mt-1">총 테스트</div></div>
+              <div className="text-center"><div className="text-2xl font-bold gradient-text">{summary.avgScore}%</div><div className="text-slate-400 text-xs mt-1">평균 점수</div></div>
+              <div className="text-center"><div className="text-2xl font-bold gradient-text">{summary.streak}일</div><div className="text-slate-400 text-xs mt-1">연속 학습</div></div>
             </div>
           </div>
 
@@ -1638,10 +1727,7 @@ function UserReportPage({ userId, setCurrentPage }) {
               {weeklyData.map((data, idx) => (
                 <div key={idx} className="flex-1 flex flex-col items-center gap-2">
                   <div className="text-xs text-slate-400">{data.score > 0 ? `${data.score}%` : '-'}</div>
-                  <div 
-                    className="w-full rounded-t-lg bg-gradient-to-t from-indigo-600 to-purple-500 transition-all"
-                    style={{ height: data.score > 0 ? `${(data.score / maxScore) * 100}%` : '4px', opacity: data.score > 0 ? 1 : 0.3 }}
-                  />
+                  <div className="w-full rounded-t-lg bg-gradient-to-t from-indigo-600 to-purple-500 transition-all" style={{ height: data.score > 0 ? `${(data.score / maxScore) * 100}%` : '4px', opacity: data.score > 0 ? 1 : 0.3 }} />
                   <div className="text-center">
                     <div className="text-xs text-white font-medium">{data.day}</div>
                     <div className="text-xs text-slate-500">{data.date}</div>
@@ -1667,37 +1753,6 @@ function UserReportPage({ userId, setCurrentPage }) {
           )}
         </>
       )}
-    </div>
-  );
-}
-
-// ============ 하단 네비게이션 ============
-function BottomNav({ currentPage, setCurrentPage, isAdmin }) {
-  const items = [
-    { id: 'home', icon: '🏠', label: '홈' },
-    { id: 'report', icon: '📊', label: '리포트' },
-    { id: 'upload', icon: '📁', label: '업로드' },
-    { id: 'settings', icon: '⚙️', label: '설정' },
-  ];
-
-  if (isAdmin) {
-    items.splice(3, 0, { id: 'admin', icon: '👑', label: '관리자' });
-  }
-  
-  return (
-    <div className="fixed bottom-0 left-0 right-0 glass border-t border-white/10">
-      <div className="max-w-md mx-auto flex justify-around py-4">
-        {items.map(item => (
-          <button
-            key={item.id}
-            onClick={() => setCurrentPage(item.id)}
-            className={`flex flex-col items-center gap-1 ${currentPage === item.id ? 'text-indigo-400' : 'text-slate-400 hover:text-white'}`}
-          >
-            <span className="text-xl">{item.icon}</span>
-            <span className="text-xs">{item.label}</span>
-          </button>
-        ))}
-      </div>
     </div>
   );
 }
